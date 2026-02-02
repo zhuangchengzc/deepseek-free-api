@@ -224,6 +224,12 @@ pm2 reload deepseek-free-api
 pm2 stop deepseek-free-api
 ```
 
+删除服务
+
+```shell
+pm2 delete deepseek-free-api
+```
+
 ## 推荐使用客户端
 
 使用以下二次开发客户端接入free-api系列项目更快更简单，支持文档/图像上传！

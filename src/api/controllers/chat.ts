@@ -93,7 +93,8 @@ async function requestToken(refreshToken: string) {
         validateStatus: () => true,
       }
     );
-    const { token } = checkResult(result, refreshToken);
+    const checkResultData = checkResult(result, refreshToken);
+    const token = checkResultData?.biz_data?.token || checkResultData?.token;
     return {
       accessToken: token,
       refreshToken: token,
@@ -570,13 +571,39 @@ async function receiveStream(model: string, stream: any, refConvId?: string): Pr
     };
     const parser = createParser((event) => {
       try {
-        if (event.type !== "event" || event.data.trim() == "[DONE]") return;
-        // 解析JSON
-        const result = _.attempt(() => JSON.parse(event.data));
-        if (_.isError(result))
-          throw new Error(`Stream response invalid: ${event.data}`);
-        if (!result.choices || !result.choices[0] || !result.choices[0].delta)
+        // 只处理没有特定 event 字段的事件（默认事件）
+        if (event.type !== "event") {
           return;
+        }
+        if ((event as any).event && (event as any).event !== 'message') {
+          return;
+        }
+        const eventData = (event as any).data;
+        if (!eventData || eventData.trim() == "[DONE]") {
+          return;
+        }
+        // 解析JSON
+        const result = _.attempt(() => JSON.parse(eventData));
+        if (_.isError(result))
+          throw new Error(`Stream response invalid: ${eventData}`);
+        
+        // 新格式：处理 DeepSeek 的新 API 格式
+        if (result.v !== undefined) {
+          // 检查是否是内容更新
+          if (result.p === 'response/content' || result.o === 'APPEND' || typeof result.v === 'string') {
+            data.choices[0].message.content += result.v;
+          }
+          // 检查是否有 message_id
+          if (result.response && result.response.message_id && !data.id) {
+            data.id = `${refConvId}@${result.response.message_id}`;
+          }
+          return;
+        }
+        
+        // 旧格式：兼容原有的 choices/delta 格式
+        if (!result.choices || !result.choices[0] || !result.choices[0].delta) {
+          return;
+        }
         if (!data.id)
           data.id = `${refConvId}@${result.message_id}`;
         if (result.choices[0].delta.type === "search_result" && !isSilentModel) {
@@ -787,7 +814,13 @@ function createTransStream(model: string, stream: any, refConvId: string, endCal
  * @param authorization 认证字符串
  */
 function tokenSplit(authorization: string) {
-  return authorization.replace("Bearer ", "").split(",");
+  // Normalize: remove leading 'Bearer ', split by comma, trim, drop empties
+  if (!authorization) return [];
+  return authorization
+    .replace(/^Bearer\s+/i, "")
+    .split(",")
+    .map((t: string) => t.trim())
+    .filter((t: string) => t.length > 0);
 }
 
 /**

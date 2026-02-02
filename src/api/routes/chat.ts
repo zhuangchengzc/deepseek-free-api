@@ -3,6 +3,8 @@ import _ from 'lodash';
 import Request from '@/lib/request/Request.ts';
 import Response from '@/lib/response/Response.ts';
 import chat from '@/api/controllers/chat.ts';
+import APIException from '@/lib/exceptions/APIException.ts';
+import EX from '@/api/consts/exceptions.ts';
 import process from "process";
 
 
@@ -15,17 +17,21 @@ export default {
     post: {
 
         '/completions': async (request: Request) => {
-            request
-                .validate('body.conversation_id', v => _.isUndefined(v) || _.isString(v))
-                .validate('body.messages', _.isArray)
-                .validate('headers.authorization', _.isString)
-
-            // 如果环境变量没有token则读取请求中的
+            // 如果环境变量有 token，先覆盖请求头再进行校验
             if (DEEP_SEEK_CHAT_AUTHORIZATION) {
                 request.headers.authorization = "Bearer " + DEEP_SEEK_CHAT_AUTHORIZATION;
             }
-            // token切分
-            const tokens = chat.tokenSplit(request.headers.authorization);
+            request
+                .validate('body.conversation_id', v => _.isUndefined(v) || _.isString(v))
+                .validate('body.messages', _.isArray)
+                .validate('headers.authorization', v => _.isUndefined(v) || _.isString(v) || _.isArray(v))
+            // token切分前确保 header 不为空
+            let authHeader = request.headers.authorization;
+            if (Array.isArray(authHeader)) authHeader = authHeader.join(',');
+            const tokens = chat.tokenSplit(authHeader);
+            if (!tokens || tokens.length === 0) {
+                throw new APIException(EX.API_REQUEST_PARAMS_INVALID, 'Params headers.authorization invalid');
+            }
             // 随机挑选一个token
             const token = _.sample(tokens);
             let { model, conversation_id: convId, messages, stream } = request.body;
@@ -36,8 +42,9 @@ export default {
                     type: "text/event-stream"
                 });
             }
-            else
+            else {
                 return await chat.createCompletion(model, messages, token, convId);
+            }
         }
 
     }
