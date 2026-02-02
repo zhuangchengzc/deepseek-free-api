@@ -93,8 +93,12 @@ async function requestToken(refreshToken: string) {
         validateStatus: () => true,
       }
     );
+    logger.info('[DEBUG requestToken] API 响应状态:', result.status);
+    logger.info('[DEBUG requestToken] API 响应数据:', JSON.stringify(result.data).substring(0, 200));
     const checkResultData = checkResult(result, refreshToken);
+    logger.info('[DEBUG requestToken] checkResult 返回:', JSON.stringify(checkResultData).substring(0, 200));
     const token = checkResultData?.biz_data?.token || checkResultData?.token;
+    logger.info('[DEBUG requestToken] 提取的 token:', token ? token.substring(0, 30) + '...' : 'null/undefined');
     return {
       accessToken: token,
       refreshToken: token,
@@ -553,6 +557,7 @@ async function receiveStream(model: string, stream: any, refConvId?: string): Pr
   const isFoldModel = model.includes('fold');
   logger.info(`模型: ${model}, 是否思考: ${isThinkingModel} 是否联网搜索: ${isSearchModel}, 是否静默思考: ${isSilentModel}, 是否折叠思考: ${isFoldModel}`);
   let refContent = '';
+  let eventCount = 0;
   return new Promise((resolve, reject) => {
     // 消息初始化
     const data = {
@@ -571,27 +576,41 @@ async function receiveStream(model: string, stream: any, refConvId?: string): Pr
     };
     const parser = createParser((event) => {
       try {
+        eventCount++;
+        if (eventCount <= 10) {
+          const eventStr = JSON.stringify(event).substring(0, 200);
+          logger.info(`[DEBUG receiveStream] Event ${eventCount}:`, eventStr);
+        }
         // 只处理没有特定 event 字段的事件（默认事件）
         if (event.type !== "event") {
+          if (eventCount <= 10) logger.info(`[DEBUG] 跳过: type !== "event"`);
           return;
         }
         if ((event as any).event && (event as any).event !== 'message') {
+          if (eventCount <= 10) logger.info(`[DEBUG] 跳过: event = ${(event as any).event}`);
           return;
         }
         const eventData = (event as any).data;
         if (!eventData || eventData.trim() == "[DONE]") {
+          if (eventCount <= 10) logger.info(`[DEBUG] 跳过: data = [DONE] 或空`);
           return;
         }
         // 解析JSON
         const result = _.attempt(() => JSON.parse(eventData));
-        if (_.isError(result))
+        if (_.isError(result)) {
+          logger.warn(`[DEBUG] JSON 解析失败:`, eventData.substring(0, 100));
           throw new Error(`Stream response invalid: ${eventData}`);
+        }
+        if (eventCount <= 10) {
+          logger.info(`[DEBUG] 解析成功, 数据结构:`, JSON.stringify(result).substring(0, 150));
+        }
         
         // 新格式：处理 DeepSeek 的新 API 格式
         if (result.v !== undefined) {
           // 检查是否是内容更新
           if (result.p === 'response/content' || result.o === 'APPEND' || typeof result.v === 'string') {
             data.choices[0].message.content += result.v;
+            if (eventCount <= 15) logger.info(`[DEBUG] 添加内容: "${result.v}"`);
           }
           // 检查是否有 message_id
           if (result.response && result.response.message_id && !data.id) {
@@ -602,6 +621,7 @@ async function receiveStream(model: string, stream: any, refConvId?: string): Pr
         
         // 旧格式：兼容原有的 choices/delta 格式
         if (!result.choices || !result.choices[0] || !result.choices[0].delta) {
+          if (eventCount <= 10) logger.info(`[DEBUG] 跳过: 没有 choices/delta 也没有 v 字段`);
           return;
         }
         if (!data.id)
@@ -631,6 +651,7 @@ async function receiveStream(model: string, stream: any, refConvId?: string): Pr
           }
         }
         if (result.choices && result.choices[0] && result.choices[0].finish_reason === "stop") {
+          logger.info(`[DEBUG receiveStream] 收到 finish_reason=stop, 总事件数: ${eventCount}`);
           data.choices[0].message.content = data.choices[0].message.content.replace(/^\n+/, '').replace(/\[citation:\d+\]/g, '') + (refContent ? `\n\n搜索结果来自：\n${refContent}` : '');
           resolve(data);
         }
@@ -640,9 +661,20 @@ async function receiveStream(model: string, stream: any, refConvId?: string): Pr
       }
     });
     // 将流数据喂给SSE转换器
-    stream.on("data", (buffer) => parser.feed(buffer.toString()));
+    let dataChunkCount = 0;
+    stream.on("data", (buffer) => {
+      dataChunkCount++;
+      const bufferStr = buffer.toString();
+      if (dataChunkCount <= 3) {
+        logger.info(`[DEBUG receiveStream] Data chunk ${dataChunkCount} (${bufferStr.length} bytes):`, bufferStr.substring(0, 200));
+      }
+      parser.feed(bufferStr);
+    });
     stream.once("error", (err) => reject(err));
-    stream.once("close", () => resolve(data));
+    stream.once("close", () => {
+      logger.info(`[DEBUG receiveStream] Stream closed, 总数据块: ${dataChunkCount}, 总事件数: ${eventCount}, content长度: ${data.choices[0].message.content.length}`);
+      resolve(data);
+    });
   });
 }
 
@@ -816,11 +848,15 @@ function createTransStream(model: string, stream: any, refConvId: string, endCal
 function tokenSplit(authorization: string) {
   // Normalize: remove leading 'Bearer ', split by comma, trim, drop empties
   if (!authorization) return [];
-  return authorization
-    .replace(/^Bearer\s+/i, "")
+  const normalized = authorization.replace(/^Bearer\s+/i, "");
+  logger.info('[DEBUG tokenSplit] 原始 authorization:', authorization);
+  logger.info('[DEBUG tokenSplit] 去除 Bearer 后:', normalized);
+  const tokens = normalized
     .split(",")
     .map((t: string) => t.trim())
     .filter((t: string) => t.length > 0);
+  logger.info('[DEBUG tokenSplit] 切分结果:', tokens.map((t, i) => `[${i}]: ${t.substring(0, 20)}...`));
+  return tokens;
 }
 
 /**
