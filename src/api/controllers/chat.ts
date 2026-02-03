@@ -177,6 +177,37 @@ async function createSession(model: string, refreshToken: string): Promise<strin
 }
 
 /**
+ * 删除会话
+ * 
+ * @param sessionId 会话ID
+ * @param refreshToken 用于刷新access_token的refresh_token
+ */
+async function deleteSession(sessionId: string, refreshToken: string): Promise<void> {
+  try {
+    const token = await acquireToken(refreshToken);
+    const result = await axios.post(
+      "https://chat.deepseek.com/api/v0/chat_session/delete",
+      {
+        chat_session_id: sessionId
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          ...FAKE_HEADERS,
+          Cookie: generateCookie()
+        },
+        timeout: 15000,
+        validateStatus: () => true,
+      }
+    );
+    checkResult(result, refreshToken);
+    logger.info(`会话已删除: ${sessionId}`);
+  } catch (err) {
+    logger.error(`删除会话失败: ${sessionId}`, err);
+  }
+}
+
+/**
  * 碰撞challenge答案
  * 
  * 厂商这个反逆向的策略不错哦
@@ -313,6 +344,11 @@ async function createCompletion(
     logger.success(
       `Stream has completed transfer ${util.timestamp() - streamStartTime}ms`
     );
+
+    // 如果是临时创建的会话（非引用会话），则删除
+    if (!refSessionId) {
+      await deleteSession(sessionId, refreshToken);
+    }
 
     return answer;
   })().catch((err) => {
