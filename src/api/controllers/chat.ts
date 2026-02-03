@@ -346,7 +346,7 @@ async function createCompletion(
     );
 
     // 如果是临时创建的会话（非引用会话），则删除
-    if (!refSessionId) {
+    if (sessionId != refSessionId) {
       await deleteSession(sessionId, refreshToken);
     }
 
