@@ -346,8 +346,8 @@ async function createCompletion(
     );
 
     // 如果是临时创建的会话（非引用会话），则删除
-    if (sessionId != refSessionId) {
-      await deleteSession(sessionId, refreshToken);
+    if (!refSessionId) {
+     await deleteSession(sessionId, refreshToken);
     }
 
     return answer;
@@ -479,10 +479,15 @@ async function createCompletionStream(
     }
     const streamStartTime = util.timestamp();
     // 创建转换流将消息格式转换为gpt兼容格式
-    return createTransStream(model, result.data, sessionId, () => {
+    return createTransStream(model, result.data, sessionId, async () => {
       logger.success(
         `Stream has completed transfer ${util.timestamp() - streamStartTime}ms`
       );
+
+      // 如果是临时创建的会话（非引用会话），则删除
+      if (!refSessionId) {
+      await deleteSession(sessionId, refreshToken);
+      }
     });
   })().catch((err) => {
     if (retryCount < MAX_RETRY_COUNT) {
@@ -1343,9 +1348,12 @@ async function fetchAppVersion(): Promise<string> {
       }
     });
     if (response.status === 200 && response.data) {
-      const version = response.data.toString().trim();
-      logger.info(`获取版本号: ${version}`);
-      return version;
+      // 移除所有非法字符（换行符、回车符、制表符等）
+      const version = response.data.toString().replace(/[\r\n\t\s]+/g, '').trim();
+      if (version && /^[\w.-]+$/.test(version)) {
+        logger.info(`获取版本号: ${version}`);
+        return version;
+      }
     }
   } catch (err) {
     logger.error('获取版本号失败:', err);
