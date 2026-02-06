@@ -24,6 +24,8 @@ export default {
             request
                 .validate('body.conversation_id', v => _.isUndefined(v) || _.isString(v))
                 .validate('body.messages', _.isArray)
+                .validate('body.tools', v => _.isUndefined(v) || _.isArray(v))
+                .validate('body.tool_choice', v => _.isUndefined(v) || _.isString(v) || _.isObject(v))
                 .validate('headers.authorization', v => _.isUndefined(v) || _.isString(v) || _.isArray(v))
             // token切分前确保 header 不为空
             let authHeader = request.headers.authorization;
@@ -34,16 +36,16 @@ export default {
             }
             // 随机挑选一个token
             const token = _.sample(tokens);
-            let { model, conversation_id: convId, messages, stream } = request.body;
+            let { model, conversation_id: convId, messages, stream, tools, tool_choice: toolChoice } = request.body;
             model = model.toLowerCase();
             if (stream) {
-                const stream = await chat.createCompletionStream(model, messages, token, convId);
+                const stream = await chat.createCompletionStream(model, messages, token, convId, 0, tools, toolChoice);
                 return new Response(stream, {
                     type: "text/event-stream"
                 });
             }
             else {
-                const result = await chat.createCompletion(model, messages, token, convId);
+                const result = await chat.createCompletion(model, messages, token, convId, 0, tools, toolChoice);
                 return result;
             }
         }

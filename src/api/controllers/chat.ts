@@ -259,13 +259,17 @@ async function getChallengeResponse(refreshToken: string, targetPath: string) {
  * @param refreshToken 用于刷新access_token的refresh_token
  * @param refConvId 引用对话ID
  * @param retryCount 重试次数
+ * @param tools 工具列表
+ * @param toolChoice 工具选择策略
  */
 async function createCompletion(
   model = MODEL_NAME,
   messages: any[],
   refreshToken: string,
   refConvId?: string,
-  retryCount = 0
+  retryCount = 0,
+  tools?: any[],
+  toolChoice?: any
 ) {
   return (async () => {
     logger.info(messages);
@@ -287,6 +291,9 @@ async function createCompletion(
 
     const isSearchModel = model.includes('search') || prompt.includes('联网搜索');
     const isThinkingModel = model.includes('think') || model.includes('r1') || prompt.includes('深度思考');
+    
+    // 处理工具调用
+    const hasTools = tools && tools.length > 0;
 
     // 已经支持同时使用，此处注释
     // if(isSearchModel && isThinkingModel)
@@ -303,16 +310,42 @@ async function createCompletion(
     const challenge = await answerChallenge(challengeResponse, '/api/v0/chat/completion');
     logger.info(`插冷鸡: ${challenge}`);
 
+    // 构建请求体
+    const requestBody: any = {
+      chat_session_id: sessionId,
+      parent_message_id: refParentMsgId || null,
+      prompt,
+      ref_file_ids: [],
+      search_enabled: isSearchModel,
+      thinking_enabled: isThinkingModel
+    };
+
+    // 添加工具调用参数
+    if (hasTools) {
+      requestBody.tools = tools.map(tool => ({
+        type: 'function',
+        function: {
+          name: tool.function.name,
+          description: tool.function.description || '',
+          parameters: tool.function.parameters || {}
+        }
+      }));
+      
+      if (toolChoice) {
+        if (toolChoice === 'auto' || toolChoice === 'none') {
+          requestBody.tool_choice = toolChoice;
+        } else if (typeof toolChoice === 'object' && toolChoice.type === 'function') {
+          requestBody.tool_choice = {
+            type: 'function',
+            function: { name: toolChoice.function.name }
+          };
+        }
+      }
+    }
+
     const result = await axios.post(
       "https://chat.deepseek.com/api/v0/chat/completion",
-      {
-        chat_session_id: sessionId,
-        parent_message_id: refParentMsgId || null,
-        prompt,
-        ref_file_ids: [],
-        search_enabled: isSearchModel,
-        thinking_enabled: isThinkingModel
-      },
+      requestBody,
       {
         headers: {
           Authorization: `Bearer ${token}`,
@@ -340,7 +373,7 @@ async function createCompletion(
 
     const streamStartTime = util.timestamp();
     // 接收流为输出文本
-    const answer = await receiveStream(model, result.data, sessionId);
+    const answer = await receiveStream(model, result.data, sessionId, hasTools);
     logger.success(
       `Stream has completed transfer ${util.timestamp() - streamStartTime}ms`
     );
@@ -362,7 +395,9 @@ async function createCompletion(
           messages,
           refreshToken,
           refConvId,
-          retryCount + 1
+          retryCount + 1,
+          tools,
+          toolChoice
         );
       })();
     }
@@ -378,13 +413,17 @@ async function createCompletion(
  * @param refreshToken 用于刷新access_token的refresh_token
  * @param refConvId 引用对话ID
  * @param retryCount 重试次数
+ * @param tools 工具列表
+ * @param toolChoice 工具选择策略
  */
 async function createCompletionStream(
   model = MODEL_NAME,
   messages: any[],
   refreshToken: string,
   refConvId?: string,
-  retryCount = 0
+  retryCount = 0,
+  tools?: any[],
+  toolChoice?: any
 ) {
   return (async () => {
     logger.info(messages);
@@ -401,6 +440,9 @@ async function createCompletionStream(
 
     const isSearchModel = model.includes('search') || prompt.includes('联网搜索');
     const isThinkingModel = model.includes('think') || model.includes('r1') || prompt.includes('深度思考');
+    
+    // 处理工具调用
+    const hasTools = tools && tools.length > 0;
 
     // 已经支持同时使用，此处注释
     // if(isSearchModel && isThinkingModel)
@@ -422,16 +464,42 @@ async function createCompletionStream(
     // 请求流
     const token = await acquireToken(refreshToken);
 
+    // 构建请求体
+    const requestBody: any = {
+      chat_session_id: sessionId,
+      parent_message_id: refParentMsgId || null,
+      prompt,
+      ref_file_ids: [],
+      search_enabled: isSearchModel,
+      thinking_enabled: isThinkingModel
+    };
+
+    // 添加工具调用参数
+    if (hasTools) {
+      requestBody.tools = tools.map(tool => ({
+        type: 'function',
+        function: {
+          name: tool.function.name,
+          description: tool.function.description || '',
+          parameters: tool.function.parameters || {}
+        }
+      }));
+      
+      if (toolChoice) {
+        if (toolChoice === 'auto' || toolChoice === 'none') {
+          requestBody.tool_choice = toolChoice;
+        } else if (typeof toolChoice === 'object' && toolChoice.type === 'function') {
+          requestBody.tool_choice = {
+            type: 'function',
+            function: { name: toolChoice.function.name }
+          };
+        }
+      }
+    }
+
     const result = await axios.post(
       "https://chat.deepseek.com/api/v0/chat/completion",
-      {
-        chat_session_id: sessionId,
-        parent_message_id: refParentMsgId || null,
-        prompt,
-        ref_file_ids: [],
-        search_enabled: isSearchModel,
-        thinking_enabled: isThinkingModel
-      },
+      requestBody,
       {
         headers: {
           Authorization: `Bearer ${token}`,
@@ -479,7 +547,7 @@ async function createCompletionStream(
     }
     const streamStartTime = util.timestamp();
     // 创建转换流将消息格式转换为gpt兼容格式
-    return createTransStream(model, result.data, sessionId, async () => {
+    return createTransStream(model, result.data, sessionId, hasTools, async () => {
       logger.success(
         `Stream has completed transfer ${util.timestamp() - streamStartTime}ms`
       );
@@ -500,7 +568,9 @@ async function createCompletionStream(
           messages,
           refreshToken,
           refConvId,
-          retryCount + 1
+          retryCount + 1,
+          tools,
+          toolChoice
         );
       })();
     }
@@ -585,8 +655,10 @@ function checkResult(result: AxiosResponse, refreshToken: string) {
  *
  * @param model 模型名称
  * @param stream 消息流
+ * @param refConvId 引用对话ID
+ * @param hasTools 是否有工具调用
  */
-async function receiveStream(model: string, stream: any, refConvId?: string): Promise<any> {
+async function receiveStream(model: string, stream: any, refConvId?: string, hasTools = false): Promise<any> {
   let thinking = false;
   const isSearchModel = model.includes('search');
   const isThinkingModel = model.includes('think') || model.includes('r1');
@@ -603,13 +675,23 @@ async function receiveStream(model: string, stream: any, refConvId?: string): Pr
       choices: [
         {
           index: 0,
-          message: { role: "assistant", content: "", reasoning_content: "" },
+          message: { 
+            role: "assistant", 
+            content: "", 
+            reasoning_content: "",
+            tool_calls: undefined as any[] | undefined
+          },
           finish_reason: "stop",
         },
       ],
       usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
       created: util.unixTimestamp(),
     };
+    
+    // 工具调用相关
+    let toolCalls: any[] = [];
+    let currentToolCall: any = null;
+    
     const parser = createParser((event) => {
       try {
         // 只处理没有特定 event 字段的事件（默认事件）
@@ -627,7 +709,12 @@ async function receiveStream(model: string, stream: any, refConvId?: string): Pr
         if (result.v !== undefined) {
           // 检查是否是内容更新
           if (result.p === 'response/content' || result.o === 'APPEND' || typeof result.v === 'string') {
-            data.choices[0].message.content += result.v;
+            // 过滤掉 FINISHED 标记
+            let content = result.v;
+            if (typeof content === 'string') {
+              content = content.replace(/FINISHED\s*$/i, '');
+            }
+            data.choices[0].message.content += content;
           }
           // 检查是否有 message_id
           if (result.response && result.response.message_id && !data.id) {
@@ -665,8 +752,48 @@ async function receiveStream(model: string, stream: any, refConvId?: string): Pr
             data.choices[0].message.content += result.choices[0].delta.content;
           }
         }
+        
+        // 处理工具调用
+        if (hasTools && result.choices[0].delta.tool_calls) {
+          const deltaToolCalls = result.choices[0].delta.tool_calls;
+          for (const deltaToolCall of deltaToolCalls) {
+            if (deltaToolCall.index !== undefined) {
+              // 新的工具调用或更新现有的
+              if (!toolCalls[deltaToolCall.index]) {
+                toolCalls[deltaToolCall.index] = {
+                  id: deltaToolCall.id || `call_${util.uuid(false)}`,
+                  type: 'function',
+                  function: {
+                    name: deltaToolCall.function?.name || '',
+                    arguments: deltaToolCall.function?.arguments || ''
+                  }
+                };
+              } else {
+                // 追加参数
+                if (deltaToolCall.function?.arguments) {
+                  toolCalls[deltaToolCall.index].function.arguments += deltaToolCall.function.arguments;
+                }
+                if (deltaToolCall.function?.name) {
+                  toolCalls[deltaToolCall.index].function.name = deltaToolCall.function.name;
+                }
+              }
+            }
+          }
+        }
+        
         if (result.choices && result.choices[0] && result.choices[0].finish_reason === "stop") {
-          data.choices[0].message.content = data.choices[0].message.content.replace(/^\n+/, '').replace(/\[citation:\d+\]/g, '') + (refContent ? `\n\n搜索结果来自：\n${refContent}` : '');
+          data.choices[0].message.content = data.choices[0].message.content
+            .replace(/^\n+/, '')
+            .replace(/\[citation:\d+\]/g, '')
+            .replace(/FINISHED\s*$/i, '')
+            .trim() + (refContent ? `\n\n搜索结果来自：\n${refContent}` : '');
+          
+          // 添加工具调用到消息中
+          if (toolCalls.length > 0) {
+            data.choices[0].message.tool_calls = toolCalls;
+            data.choices[0].finish_reason = 'tool_calls';
+          }
+          
           resolve(data);
         }
       } catch (err) {
@@ -688,9 +815,11 @@ async function receiveStream(model: string, stream: any, refConvId?: string): Pr
  *
  * @param model 模型名称
  * @param stream 消息流
+ * @param refConvId 引用对话ID
+ * @param hasTools 是否有工具调用
  * @param endCallback 传输结束回调
  */
-function createTransStream(model: string, stream: any, refConvId: string, endCallback?: Function) {
+function createTransStream(model: string, stream: any, refConvId: string, hasTools = false, endCallback?: Function) {
   let thinking = false;
   const isSearchModel = model.includes('search');
   const isThinkingModel = model.includes('think') || model.includes('r1');
@@ -701,6 +830,10 @@ function createTransStream(model: string, stream: any, refConvId: string, endCal
   const created = util.unixTimestamp();
   // 创建转换流
   const transStream = new PassThrough();
+  
+  // 工具调用相关
+  let toolCalls: any[] = [];
+  
   !transStream.closed &&
     transStream.write(
       `data: ${JSON.stringify({
@@ -734,7 +867,11 @@ function createTransStream(model: string, stream: any, refConvId: string, endCal
       if (result.v !== undefined) {
         // 检查是否是内容更新
         if (result.p === 'response/content' || result.o === 'APPEND' || typeof result.v === 'string') {
-          const content = result.v;
+          // 过滤掉 FINISHED 标记
+          let content = result.v;
+          if (typeof content === 'string') {
+            content = content.replace(/FINISHED\s*$/i, '');
+          }
           transStream.write(`data: ${JSON.stringify({
             id: refConvId,
             model,
@@ -851,8 +988,62 @@ function createTransStream(model: string, stream: any, refConvId: string, endCal
         ],
         created,
       })}\n\n`);
+      
+      // 处理工具调用
+      if (hasTools && result.choices[0].delta.tool_calls) {
+        const deltaToolCalls = result.choices[0].delta.tool_calls;
+        for (const deltaToolCall of deltaToolCalls) {
+          if (deltaToolCall.index !== undefined) {
+            // 新的工具调用或更新现有的
+            if (!toolCalls[deltaToolCall.index]) {
+              toolCalls[deltaToolCall.index] = {
+                id: deltaToolCall.id || `call_${util.uuid(false)}`,
+                type: 'function',
+                function: {
+                  name: deltaToolCall.function?.name || '',
+                  arguments: deltaToolCall.function?.arguments || ''
+                }
+              };
+            } else {
+              // 追加参数
+              if (deltaToolCall.function?.arguments) {
+                toolCalls[deltaToolCall.index].function.arguments += deltaToolCall.function.arguments;
+              }
+              if (deltaToolCall.function?.name) {
+                toolCalls[deltaToolCall.index].function.name = deltaToolCall.function.name;
+              }
+            }
+            
+            // 发送工具调用增量
+            transStream.write(`data: ${JSON.stringify({
+              id: `${refConvId}@${result.message_id}`,
+              model: result.model,
+              object: "chat.completion.chunk",
+              choices: [
+                {
+                  index: 0,
+                  delta: {
+                    tool_calls: [{
+                      index: deltaToolCall.index,
+                      id: deltaToolCall.id,
+                      type: 'function',
+                      function: {
+                        name: deltaToolCall.function?.name,
+                        arguments: deltaToolCall.function?.arguments
+                      }
+                    }]
+                  },
+                  finish_reason: null,
+                },
+              ],
+              created,
+            })}\n\n`);
+          }
+        }
+      }
 
       if (result.choices && result.choices[0] && result.choices[0].finish_reason === "stop") {
+        const finishReason = toolCalls.length > 0 ? 'tool_calls' : 'stop';
         transStream.write(`data: ${JSON.stringify({
           id: `${refConvId}@${result.message_id}`,
           model: result.model,
@@ -861,7 +1052,7 @@ function createTransStream(model: string, stream: any, refConvId: string, endCal
             {
               index: 0,
               delta: { role: "assistant", content: "" },
-              finish_reason: "stop"
+              finish_reason: finishReason
             },
           ],
           created,
