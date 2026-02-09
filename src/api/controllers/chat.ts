@@ -378,6 +378,19 @@ async function createCompletion(
       `Stream has completed transfer ${util.timestamp() - streamStartTime}ms`
     );
 
+    // 如果启用了工具但返回空响应，重新请求（不带工具定义）
+    if (hasTools && 
+        (!answer.choices[0].message.tool_calls || answer.choices[0].message.tool_calls.length === 0) &&
+        (!answer.choices[0].message.content || answer.choices[0].message.content.trim() === '')) {
+      logger.warn('[createCompletion] 检测到空响应，重新请求（不带工具定义）');
+      // 删除临时会话
+      if (!refSessionId) {
+        await deleteSession(sessionId, refreshToken);
+      }
+      // 递归调用，不传递 tools 参数
+      return await createCompletion(model, messages, refreshToken, refConvId, retryCount);
+    }
+
     // 如果是临时创建的会话（非引用会话），则删除
     if (!refSessionId) {
      await deleteSession(sessionId, refreshToken);
@@ -459,11 +472,12 @@ async function createCompletionStream(
       
       const choice = completion.choices[0];
       
-      // 如果既没有工具调用也没有内容，添加默认回复
+      // 如果既没有工具调用也没有内容，重新请求（不带工具定义）
       if ((!choice.message.tool_calls || choice.message.tool_calls.length === 0) && 
           (!choice.message.content || choice.message.content.trim() === '')) {
-        logger.warn('[流式工具调用] 模型返回空响应，使用默认回复');
-        choice.message.content = '我理解了。请问有什么我可以帮助您的吗？';
+        logger.warn('[流式工具调用] 模型返回空响应，重新创建会话（不带工具定义）');
+        // 递归调用，但不传递 tools 参数
+        return await createCompletionStream(model, messages, refreshToken, refConvId, retryCount);
       }
       
       // 如果有工具调用，发送工具调用信息
@@ -994,12 +1008,6 @@ async function receiveStream(model: string, stream: any, refConvId?: string, has
           
           data.choices[0].message.content = finalContent + (refContent ? `\n\n搜索结果来自：\n${refContent}` : '');
           
-          // 如果既没有工具调用也没有内容，添加默认回复
-          if (toolCalls.length === 0 && (!data.choices[0].message.content || data.choices[0].message.content.trim() === '')) {
-            logger.warn('[工具调用] 模型返回空响应，使用默认回复');
-            data.choices[0].message.content = '我理解了。请问有什么我可以帮助您的吗？';
-          }
-          
           // 添加工具调用到消息中
           if (toolCalls.length > 0) {
             data.choices[0].message.tool_calls = toolCalls;
@@ -1032,12 +1040,6 @@ async function receiveStream(model: string, stream: any, refConvId?: string, has
         } else {
           logger.warn(`[工具调用] 未能解析出工具调用`);
         }
-      }
-      
-      // 如果既没有工具调用也没有内容，添加默认回复
-      if (toolCalls.length === 0 && (!data.choices[0].message.content || data.choices[0].message.content.trim() === '')) {
-        logger.warn('[工具调用] 流结束时检测到空响应，使用默认回复');
-        data.choices[0].message.content = '我理解了。请问有什么我可以帮助您的吗？';
       }
       
       resolve(data);
