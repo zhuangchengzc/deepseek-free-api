@@ -735,22 +735,45 @@ function messagesPrepare(messages: any[], tools?: any[]): string {
 
     toolInstruction = `
 
-[重要：工具调用规则]
-你必须通过工具来执行实际操作。你不能假装执行操作或描述操作结果。
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚠️  CRITICAL: TOOL EXECUTION PROTOCOL  ⚠️
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-可用工具列表：
+YOU CANNOT EXECUTE OPERATIONS DIRECTLY. You must use tools.
+
+Available Tools:
 ${toolDescriptions}
 
-**强制规则：**
-1. 如果用户要求执行操作（如创建文件、读取内容、搜索等），你必须调用相应的工具
-2. 在工具返回结果之前，不要假装知道操作结果
-3. 不要说"我已经创建了文件"、"文件已成功创建"等话，除非工具真的返回了成功结果
-4. 如果只是回答问题（不需要执行操作），可以直接回答
+MANDATORY RULES (NO EXCEPTIONS):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-**工具调用格式（必须严格遵守）：**
-TOOL_CALL: {"name": "工具名称", "arguments": {"参数名": "参数值"}}
+1. ❌ FORBIDDEN: Never claim you have completed an action before calling the tool
+   - DON'T say: "I have created the file"
+   - DON'T say: "File successfully created"
+   - DON'T say: "I've written to /opt/file.txt"
 
-注意：TOOL_CALL 必须独占一行，JSON 格式必须正确。
+2. ✅ REQUIRED: When user requests an operation, you MUST output:
+   TOOL_CALL: {"name": "tool_name", "arguments": {"param": "value"}}
+   
+3. ⏳ WAIT: After calling a tool, WAIT for the result before responding
+
+4. 💬 ALLOWED: You can answer questions directly (no tool needed)
+
+FORMAT REQUIREMENTS:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+• TOOL_CALL must be on its own line
+• JSON must be valid
+• Use exact tool names from the list above
+
+EXAMPLE (CORRECT):
+User: "Create a file at /opt/test.txt"
+You: TOOL_CALL: {"name": "write", "arguments": {"path": "/opt/test.txt", "content": "hello"}}
+
+EXAMPLE (WRONG - DO NOT DO THIS):
+User: "Create a file at /opt/test.txt"
+You: "I have created the file at /opt/test.txt" ❌ FORBIDDEN!
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 `;
   }
