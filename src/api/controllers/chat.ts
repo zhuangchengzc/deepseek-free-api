@@ -434,6 +434,8 @@ async function createCompletionStream(
 
     // 处理工具调用：如果有工具定义，先用非流式获取完整响应，再模拟流式输出
     const hasTools = tools && tools.length > 0;
+    let shouldUseNormalStream = false;
+    
     if (hasTools) {
       logger.info('[流式工具调用] 检测到工具定义，使用非流式模式获取响应后模拟流式输出');
       
@@ -442,13 +444,14 @@ async function createCompletionStream(
       
       const choice = completion.choices[0];
       
-      // 检查是否真的有工具调用
+      // 检查是否真的有工具调用或内容
       const hasActualToolCalls = choice.message.tool_calls && choice.message.tool_calls.length > 0;
+      const hasContent = choice.message.content && choice.message.content.trim().length > 0;
       
-      if (!hasActualToolCalls && !choice.message.content) {
-        // 模型返回空响应，可能是拒绝回答或其他原因，走正常流式
-        logger.warn('[流式工具调用] 模型返回空响应，切换到正常流式处理');
-        // 继续执行下面的正常流式逻辑
+      if (!hasActualToolCalls && !hasContent) {
+        // 模型返回空响应，可能是拒绝回答或其他原因，降级到正常流式
+        logger.warn('[流式工具调用] 模型返回空响应，降级到正常流式处理');
+        shouldUseNormalStream = true;
       } else {
         // 有工具调用或有内容，创建模拟的流式响应
         const transStream = new PassThrough();
@@ -535,8 +538,9 @@ async function createCompletionStream(
       return transStream;
       }
     }
-
-    // 原有的流式处理逻辑（无工具调用时）
+    
+    // 如果需要使用正常流式，或者没有工具定义，执行下面的正常流式逻辑
+    if (!hasTools || shouldUseNormalStream) {
     // 消息预处理
     const prompt = messagesPrepare(messages, tools);
 
@@ -659,6 +663,7 @@ async function createCompletionStream(
       await deleteSession(sessionId, refreshToken);
       }
     });
+    }
   })().catch((err) => {
     if (retryCount < MAX_RETRY_COUNT) {
       logger.error(`Stream response error: ${err.stack}`);
