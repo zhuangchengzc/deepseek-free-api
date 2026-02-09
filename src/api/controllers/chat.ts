@@ -279,7 +279,7 @@ async function createCompletion(
       refConvId = null;
 
     // 消息预处理
-    const prompt = messagesPrepare(messages);
+    const prompt = messagesPrepare(messages, tools);
 
     // 解析引用对话ID
     const [refSessionId, refParentMsgId] = refConvId?.split('@') || [];
@@ -432,17 +432,108 @@ async function createCompletionStream(
     if (!/[0-9a-z\-]{36}@[0-9]+/.test(refConvId))
       refConvId = null;
 
+    // 处理工具调用：如果有工具定义，先用非流式获取完整响应，再模拟流式输出
+    const hasTools = tools && tools.length > 0;
+    if (hasTools) {
+      logger.info('[流式工具调用] 检测到工具定义，使用非流式模式获取响应后模拟流式输出');
+      
+      // 调用非流式接口获取完整响应
+      const completion = await createCompletion(model, messages, refreshToken, refConvId, retryCount, tools, toolChoice);
+      
+      // 创建模拟的流式响应
+      const transStream = new PassThrough();
+      const created = util.unixTimestamp();
+      
+      // 发送初始消息
+      transStream.write(`data: ${JSON.stringify({
+        id: completion.id,
+        model: completion.model,
+        object: "chat.completion.chunk",
+        choices: [{
+          index: 0,
+          delta: { role: "assistant", content: "" },
+          finish_reason: null
+        }],
+        created
+      })}\n\n`);
+      
+      const choice = completion.choices[0];
+      
+      // 如果有工具调用，发送工具调用信息
+      if (choice.message.tool_calls && choice.message.tool_calls.length > 0) {
+        for (const toolCall of choice.message.tool_calls) {
+          transStream.write(`data: ${JSON.stringify({
+            id: completion.id,
+            model: completion.model,
+            object: "chat.completion.chunk",
+            choices: [{
+              index: 0,
+              delta: {
+                tool_calls: [{
+                  index: 0,
+                  id: toolCall.id,
+                  type: toolCall.type,
+                  function: {
+                    name: toolCall.function.name,
+                    arguments: toolCall.function.arguments
+                  }
+                }]
+              },
+              finish_reason: null
+            }],
+            created
+          })}\n\n`);
+        }
+      }
+      
+      // 如果有内容，分块发送（模拟打字效果）
+      if (choice.message.content) {
+        const content = choice.message.content;
+        const chunkSize = 5; // 每次发送5个字符
+        for (let i = 0; i < content.length; i += chunkSize) {
+          const chunk = content.substring(i, i + chunkSize);
+          transStream.write(`data: ${JSON.stringify({
+            id: completion.id,
+            model: completion.model,
+            object: "chat.completion.chunk",
+            choices: [{
+              index: 0,
+              delta: { content: chunk },
+              finish_reason: null
+            }],
+            created
+          })}\n\n`);
+        }
+      }
+      
+      // 发送结束标记
+      transStream.write(`data: ${JSON.stringify({
+        id: completion.id,
+        model: completion.model,
+        object: "chat.completion.chunk",
+        choices: [{
+          index: 0,
+          delta: {},
+          finish_reason: choice.finish_reason
+        }],
+        created
+      })}\n\n`);
+      
+      transStream.end("data: [DONE]\n\n");
+      
+      logger.success('[流式工具调用] 模拟流式输出完成');
+      return transStream;
+    }
+
+    // 原有的流式处理逻辑（无工具调用时）
     // 消息预处理
-    const prompt = messagesPrepare(messages);
+    const prompt = messagesPrepare(messages, tools);
 
     // 解析引用对话ID
     const [refSessionId, refParentMsgId] = refConvId?.split('@') || [];
 
     const isSearchModel = model.includes('search') || prompt.includes('联网搜索');
     const isThinkingModel = model.includes('think') || model.includes('r1') || prompt.includes('深度思考');
-    
-    // 处理工具调用
-    const hasTools = tools && tools.length > 0;
 
     // 已经支持同时使用，此处注释
     // if(isSearchModel && isThinkingModel)
@@ -584,8 +675,9 @@ async function createCompletionStream(
  * 由于接口只取第一条消息，此处会将多条消息合并为一条，实现多轮对话效果
  *
  * @param messages 参考gpt系列消息格式，多轮对话请完整提供上下文
+ * @param tools 工具列表
  */
-function messagesPrepare(messages: any[]): string {
+function messagesPrepare(messages: any[], tools?: any[]): string {
   // 处理消息内容
   const processedMessages = messages.map(message => {
     let text: string;
@@ -603,6 +695,39 @@ function messagesPrepare(messages: any[]): string {
 
   if (processedMessages.length === 0) return '';
 
+  // 如果有工具定义，添加工具调用指令
+  let toolInstruction = '';
+  if (tools && tools.length > 0) {
+    const toolDescriptions = tools.map(tool => {
+      const func = tool.function;
+      const params = func.parameters?.properties || {};
+      const required = func.parameters?.required || [];
+      
+      const paramDesc = Object.keys(params).map(key => {
+        const param = params[key];
+        const isRequired = required.includes(key);
+        return `  - ${key}${isRequired ? ' (必需)' : ' (可选)'}: ${param.type} - ${param.description || ''}`;
+      }).join('\n');
+      
+      return `- ${func.name}: ${func.description || ''}\n${paramDesc ? '  参数:\n' + paramDesc : ''}`;
+    }).join('\n\n');
+
+    toolInstruction = `\n\n[系统指令] 你可以使用以下工具来帮助回答用户问题：
+
+${toolDescriptions}
+
+当你需要调用工具时，请严格按照以下JSON格式输出（必须在单独一行）：
+TOOL_CALL: {"name": "工具名称", "arguments": {"参数名": "参数值"}}
+
+注意：
+1. TOOL_CALL 必须独占一行
+2. JSON 必须是有效的格式
+3. 调用工具后，等待工具返回结果再继续回答
+4. 如果不需要调用工具，直接正常回答即可
+
+`;
+  }
+
   // 合并连续相同角色的消息
   const mergedBlocks: { role: string; text: string }[] = [];
   let currentBlock = { ...processedMessages[0] };
@@ -619,7 +744,7 @@ function messagesPrepare(messages: any[]): string {
   mergedBlocks.push(currentBlock);
 
   // 添加标签并连接结果
-  return mergedBlocks
+  let result = mergedBlocks
     .map((block, index) => {
       if (block.role === "assistant") {
         return `<｜Assistant｜>${block.text}<｜end▁of▁sentence｜>`;
@@ -633,6 +758,13 @@ function messagesPrepare(messages: any[]): string {
     })
     .join('')
     .replace(/\!\[.+\]\(.+\)/g, "");
+
+  // 将工具指令添加到第一个用户消息之后
+  if (toolInstruction && mergedBlocks.length > 0) {
+    result = mergedBlocks[0].text + toolInstruction + result.substring(mergedBlocks[0].text.length);
+  }
+
+  return result;
 }
 
 /**
@@ -648,6 +780,56 @@ function checkResult(result: AxiosResponse, refreshToken: string) {
   if (code === 0) return data;
   if (code == 40003) accessTokenMap.delete(refreshToken);
   throw new APIException(EX.API_REQUEST_FAILED, `[请求deepseek失败]: ${msg}`);
+}
+
+/**
+ * 解析文本中的工具调用
+ * 
+ * @param text 文本内容
+ * @returns 解析结果 { toolCalls: 工具调用数组, cleanedText: 清理后的文本 }
+ */
+function parseToolCallsFromText(text: string): { toolCalls: any[], cleanedText: string } {
+  const toolCalls: any[] = [];
+  let cleanedText = text;
+  
+  logger.info(`[parseToolCallsFromText] 输入文本: ${text.substring(0, 200)}`);
+  
+  // 匹配 TOOL_CALL: 后面的 JSON 对象（支持嵌套）
+  const toolCallPattern = /TOOL_CALL:\s*(\{(?:[^{}]|\{[^{}]*\})*\})/g;
+  let match;
+  
+  while ((match = toolCallPattern.exec(text)) !== null) {
+    logger.info(`[parseToolCallsFromText] 找到匹配: ${match[0]}`);
+    try {
+      const jsonStr = match[1];
+      logger.info(`[parseToolCallsFromText] 尝试解析 JSON: ${jsonStr}`);
+      const toolCallData = JSON.parse(jsonStr);
+      logger.info(`[parseToolCallsFromText] JSON 解析成功: ${JSON.stringify(toolCallData)}`);
+      if (toolCallData.name && toolCallData.arguments !== undefined) {
+        toolCalls.push({
+          id: `call_${util.uuid(false)}`,
+          type: 'function',
+          function: {
+            name: toolCallData.name,
+            arguments: typeof toolCallData.arguments === 'string' 
+              ? toolCallData.arguments 
+              : JSON.stringify(toolCallData.arguments)
+          }
+        });
+        // 从文本中移除工具调用标记
+        cleanedText = cleanedText.replace(match[0], '').trim();
+        logger.info(`[parseToolCallsFromText] 成功添加工具调用: ${toolCallData.name}`);
+      } else {
+        logger.warn(`[parseToolCallsFromText] 工具调用数据不完整: name=${toolCallData.name}, arguments=${toolCallData.arguments}`);
+      }
+    } catch (err) {
+      logger.warn(`解析工具调用失败: ${match[1]}`, err);
+    }
+  }
+  
+  logger.info(`[parseToolCallsFromText] 总共解析出 ${toolCalls.length} 个工具调用`);
+  
+  return { toolCalls, cleanedText };
 }
 
 /**
@@ -782,16 +964,34 @@ async function receiveStream(model: string, stream: any, refConvId?: string, has
         }
         
         if (result.choices && result.choices[0] && result.choices[0].finish_reason === "stop") {
-          data.choices[0].message.content = data.choices[0].message.content
+          let finalContent = data.choices[0].message.content
             .replace(/^\n+/, '')
             .replace(/\[citation:\d+\]/g, '')
             .replace(/FINISHED\s*$/i, '')
-            .trim() + (refContent ? `\n\n搜索结果来自：\n${refContent}` : '');
+            .trim();
+          
+          logger.info(`[工具调用] hasTools: ${hasTools}, toolCalls.length: ${toolCalls.length}`);
+          logger.info(`[工具调用] finalContent: ${finalContent.substring(0, 200)}`);
+          
+          // 如果启用了工具调用，尝试从文本中解析工具调用
+          if (hasTools && toolCalls.length === 0) {
+            logger.info('[工具调用] 开始解析文本中的工具调用');
+            const parsed = parseToolCallsFromText(finalContent);
+            logger.info(`[工具调用] 解析结果: ${parsed.toolCalls.length} 个工具调用`);
+            if (parsed.toolCalls.length > 0) {
+              logger.info(`[工具调用] 工具调用详情: ${JSON.stringify(parsed.toolCalls)}`);
+              toolCalls = parsed.toolCalls;
+              finalContent = parsed.cleanedText;
+            }
+          }
+          
+          data.choices[0].message.content = finalContent + (refContent ? `\n\n搜索结果来自：\n${refContent}` : '');
           
           // 添加工具调用到消息中
           if (toolCalls.length > 0) {
             data.choices[0].message.tool_calls = toolCalls;
             data.choices[0].finish_reason = 'tool_calls';
+            logger.success('[工具调用] 成功设置 tool_calls');
           }
           
           resolve(data);
@@ -804,7 +1004,24 @@ async function receiveStream(model: string, stream: any, refConvId?: string, has
     // 将流数据喂给SSE转换器
     stream.on("data", (buffer) => parser.feed(buffer.toString()));
     stream.once("error", (err) => reject(err));
-    stream.once("close", () => resolve(data));
+    stream.once("close", () => {
+      // 流结束时，如果启用了工具调用，尝试从文本中解析
+      if (hasTools && toolCalls.length === 0) {
+        logger.info(`[工具调用] 流结束，开始解析文本中的工具调用`);
+        logger.info(`[工具调用] 最终内容: ${data.choices[0].message.content.substring(0, 300)}`);
+        const parsed = parseToolCallsFromText(data.choices[0].message.content);
+        if (parsed.toolCalls.length > 0) {
+          logger.success(`[工具调用] 成功解析 ${parsed.toolCalls.length} 个工具调用`);
+          toolCalls = parsed.toolCalls;
+          data.choices[0].message.content = parsed.cleanedText;
+          data.choices[0].message.tool_calls = toolCalls;
+          data.choices[0].finish_reason = 'tool_calls';
+        } else {
+          logger.warn(`[工具调用] 未能解析出工具调用`);
+        }
+      }
+      resolve(data);
+    });
   });
 }
 
@@ -833,6 +1050,7 @@ function createTransStream(model: string, stream: any, refConvId: string, hasToo
   
   // 工具调用相关
   let toolCalls: any[] = [];
+  let accumulatedContent = ''; // 累积的内容，用于解析工具调用
   
   !transStream.closed &&
     transStream.write(
@@ -971,6 +1189,64 @@ function createTransStream(model: string, stream: any, refConvId: string, hasToo
         return;
 
       const deltaContent = result.choices[0].delta.content.replace(/\[citation:\d+\]/g, '');
+      
+      // 累积内容用于工具调用检测
+      if (hasTools) {
+        accumulatedContent += deltaContent;
+        
+        // 检查是否包含完整的工具调用（支持嵌套 JSON）
+        const toolCallMatch = accumulatedContent.match(/TOOL_CALL:\s*(\{(?:[^{}]|\{[^{}]*\})*\})/);
+        if (toolCallMatch) {
+          try {
+            const toolCallData = JSON.parse(toolCallMatch[1]);
+            if (toolCallData.name && toolCallData.arguments !== undefined) {
+              const toolCall = {
+                id: `call_${util.uuid(false)}`,
+                type: 'function',
+                function: {
+                  name: toolCallData.name,
+                  arguments: typeof toolCallData.arguments === 'string' 
+                    ? toolCallData.arguments 
+                    : JSON.stringify(toolCallData.arguments)
+                }
+              };
+              toolCalls.push(toolCall);
+              
+              // 发送工具调用
+              transStream.write(`data: ${JSON.stringify({
+                id: `${refConvId}@${result.message_id}`,
+                model: result.model,
+                object: "chat.completion.chunk",
+                choices: [
+                  {
+                    index: 0,
+                    delta: {
+                      tool_calls: [{
+                        index: toolCalls.length - 1,
+                        id: toolCall.id,
+                        type: 'function',
+                        function: {
+                          name: toolCall.function.name,
+                          arguments: toolCall.function.arguments
+                        }
+                      }]
+                    },
+                    finish_reason: null,
+                  },
+                ],
+                created,
+              })}\n\n`);
+              
+              // 清除已处理的工具调用部分
+              accumulatedContent = accumulatedContent.replace(toolCallMatch[0], '').trim();
+              return; // 不发送包含 TOOL_CALL 的内容
+            }
+          } catch (err) {
+            // JSON 解析失败，继续累积
+          }
+        }
+      }
+      
       const delta = result.choices[0].delta.type === "thinking" && !isFoldModel
           ? { role: "assistant", reasoning_content: deltaContent }
           : { role: "assistant", content: deltaContent };
@@ -1043,7 +1319,60 @@ function createTransStream(model: string, stream: any, refConvId: string, hasToo
       }
 
       if (result.choices && result.choices[0] && result.choices[0].finish_reason === "stop") {
+        // 在流式响应结束时，如果还有累积的内容未解析，尝试解析工具调用
+        if (hasTools && toolCalls.length === 0 && accumulatedContent.trim()) {
+          logger.info(`[流式工具调用] 结束时检查累积内容: ${accumulatedContent.substring(0, 200)}`);
+          const toolCallMatch = accumulatedContent.match(/TOOL_CALL:\s*(\{(?:[^{}]|\{[^{}]*\})*\})/);
+          if (toolCallMatch) {
+            try {
+              const toolCallData = JSON.parse(toolCallMatch[1]);
+              if (toolCallData.name && toolCallData.arguments !== undefined) {
+                const toolCall = {
+                  id: `call_${util.uuid(false)}`,
+                  type: 'function',
+                  function: {
+                    name: toolCallData.name,
+                    arguments: typeof toolCallData.arguments === 'string' 
+                      ? toolCallData.arguments 
+                      : JSON.stringify(toolCallData.arguments)
+                  }
+                };
+                toolCalls.push(toolCall);
+                logger.success(`[流式工具调用] 在结束时成功解析工具调用: ${toolCallData.name}`);
+                
+                // 发送工具调用
+                transStream.write(`data: ${JSON.stringify({
+                  id: `${refConvId}@${result.message_id}`,
+                  model: result.model,
+                  object: "chat.completion.chunk",
+                  choices: [
+                    {
+                      index: 0,
+                      delta: {
+                        tool_calls: [{
+                          index: 0,
+                          id: toolCall.id,
+                          type: 'function',
+                          function: {
+                            name: toolCall.function.name,
+                            arguments: toolCall.function.arguments
+                          }
+                        }]
+                      },
+                      finish_reason: null,
+                    },
+                  ],
+                  created,
+                })}\n\n`);
+              }
+            } catch (err) {
+              logger.warn(`[流式工具调用] 结束时解析失败: ${err.message}`);
+            }
+          }
+        }
+        
         const finishReason = toolCalls.length > 0 ? 'tool_calls' : 'stop';
+        logger.info(`[流式工具调用] 发送结束标记, finishReason: ${finishReason}, toolCalls: ${toolCalls.length}`);
         transStream.write(`data: ${JSON.stringify({
           id: `${refConvId}@${result.message_id}`,
           model: result.model,
