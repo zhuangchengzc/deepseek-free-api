@@ -440,9 +440,19 @@ async function createCompletionStream(
       // 调用非流式接口获取完整响应
       const completion = await createCompletion(model, messages, refreshToken, refConvId, retryCount, tools, toolChoice);
       
-      // 创建模拟的流式响应
-      const transStream = new PassThrough();
-      const created = util.unixTimestamp();
+      const choice = completion.choices[0];
+      
+      // 检查是否真的有工具调用
+      const hasActualToolCalls = choice.message.tool_calls && choice.message.tool_calls.length > 0;
+      
+      if (!hasActualToolCalls && !choice.message.content) {
+        // 模型返回空响应，可能是拒绝回答或其他原因，走正常流式
+        logger.warn('[流式工具调用] 模型返回空响应，切换到正常流式处理');
+        // 继续执行下面的正常流式逻辑
+      } else {
+        // 有工具调用或有内容，创建模拟的流式响应
+        const transStream = new PassThrough();
+        const created = util.unixTimestamp();
       
       // 发送初始消息
       transStream.write(`data: ${JSON.stringify({
@@ -459,7 +469,7 @@ async function createCompletionStream(
       
       const choice = completion.choices[0];
       
-      // 如果有工具调用，发送工具调用信息
+      // 如果有工具调用,发送工具调用信息
       if (choice.message.tool_calls && choice.message.tool_calls.length > 0) {
         for (const toolCall of choice.message.tool_calls) {
           transStream.write(`data: ${JSON.stringify({
@@ -523,6 +533,7 @@ async function createCompletionStream(
       
       logger.success('[流式工具调用] 模拟流式输出完成');
       return transStream;
+      }
     }
 
     // 原有的流式处理逻辑（无工具调用时）
