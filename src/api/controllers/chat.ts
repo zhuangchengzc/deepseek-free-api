@@ -434,28 +434,15 @@ async function createCompletionStream(
 
     // 处理工具调用：如果有工具定义，先用非流式获取完整响应，再模拟流式输出
     const hasTools = tools && tools.length > 0;
-    let shouldUseNormalStream = false;
-    
     if (hasTools) {
       logger.info('[流式工具调用] 检测到工具定义，使用非流式模式获取响应后模拟流式输出');
       
       // 调用非流式接口获取完整响应
       const completion = await createCompletion(model, messages, refreshToken, refConvId, retryCount, tools, toolChoice);
       
-      const choice = completion.choices[0];
-      
-      // 检查是否真的有工具调用或内容
-      const hasActualToolCalls = choice.message.tool_calls && choice.message.tool_calls.length > 0;
-      const hasContent = choice.message.content && choice.message.content.trim().length > 0;
-      
-      if (!hasActualToolCalls && !hasContent) {
-        // 模型返回空响应，可能是拒绝回答或其他原因，降级到正常流式
-        logger.warn('[流式工具调用] 模型返回空响应，降级到正常流式处理');
-        shouldUseNormalStream = true;
-      } else {
-        // 有工具调用或有内容，创建模拟的流式响应
-        const transStream = new PassThrough();
-        const created = util.unixTimestamp();
+      // 创建模拟的流式响应
+      const transStream = new PassThrough();
+      const created = util.unixTimestamp();
       
       // 发送初始消息
       transStream.write(`data: ${JSON.stringify({
@@ -472,7 +459,14 @@ async function createCompletionStream(
       
       const choice = completion.choices[0];
       
-      // 如果有工具调用,发送工具调用信息
+      // 如果既没有工具调用也没有内容，添加默认回复
+      if ((!choice.message.tool_calls || choice.message.tool_calls.length === 0) && 
+          (!choice.message.content || choice.message.content.trim() === '')) {
+        logger.warn('[流式工具调用] 模型返回空响应，使用默认回复');
+        choice.message.content = '我理解了。请问有什么我可以帮助您的吗？';
+      }
+      
+      // 如果有工具调用，发送工具调用信息
       if (choice.message.tool_calls && choice.message.tool_calls.length > 0) {
         for (const toolCall of choice.message.tool_calls) {
           transStream.write(`data: ${JSON.stringify({
@@ -536,11 +530,9 @@ async function createCompletionStream(
       
       logger.success('[流式工具调用] 模拟流式输出完成');
       return transStream;
-      }
     }
-    
-    // 如果需要使用正常流式，或者没有工具定义，执行下面的正常流式逻辑
-    if (!hasTools || shouldUseNormalStream) {
+
+    // 原有的流式处理逻辑（无工具调用时）
     // 消息预处理
     const prompt = messagesPrepare(messages, tools);
 
@@ -663,7 +655,6 @@ async function createCompletionStream(
       await deleteSession(sessionId, refreshToken);
       }
     });
-    }
   })().catch((err) => {
     if (retryCount < MAX_RETRY_COUNT) {
       logger.error(`Stream response error: ${err.stack}`);
@@ -728,18 +719,18 @@ function messagesPrepare(messages: any[], tools?: any[]): string {
       return `- ${func.name}: ${func.description || ''}\n${paramDesc ? '  参数:\n' + paramDesc : ''}`;
     }).join('\n\n');
 
-    toolInstruction = `\n\n[系统指令] 你可以使用以下工具来帮助回答用户问题：
+    toolInstruction = `
+
+[可用工具说明]
+以下工具可供选择使用，但并非必须。请根据实际需要决定是否使用：
 
 ${toolDescriptions}
 
-当你需要调用工具时，请严格按照以下JSON格式输出（必须在单独一行）：
-TOOL_CALL: {"name": "工具名称", "arguments": {"参数名": "参数值"}}
-
-注意：
-1. TOOL_CALL 必须独占一行
-2. JSON 必须是有效的格式
-3. 调用工具后，等待工具返回结果再继续回答
-4. 如果不需要调用工具，直接正常回答即可
+**使用原则：**
+• 优先直接回答：如果问题可以直接回答，请立即给出答案
+• 按需使用工具：只在确实需要工具功能时才调用（如需要读取文件内容、搜索特定信息等）
+• 工具调用格式：需要调用工具时，使用以下格式（独占一行）：
+  TOOL_CALL: {"name": "工具名称", "arguments": {"参数名": "参数值"}}
 
 `;
   }
@@ -1003,6 +994,12 @@ async function receiveStream(model: string, stream: any, refConvId?: string, has
           
           data.choices[0].message.content = finalContent + (refContent ? `\n\n搜索结果来自：\n${refContent}` : '');
           
+          // 如果既没有工具调用也没有内容，添加默认回复
+          if (toolCalls.length === 0 && (!data.choices[0].message.content || data.choices[0].message.content.trim() === '')) {
+            logger.warn('[工具调用] 模型返回空响应，使用默认回复');
+            data.choices[0].message.content = '我理解了。请问有什么我可以帮助您的吗？';
+          }
+          
           // 添加工具调用到消息中
           if (toolCalls.length > 0) {
             data.choices[0].message.tool_calls = toolCalls;
@@ -1036,6 +1033,13 @@ async function receiveStream(model: string, stream: any, refConvId?: string, has
           logger.warn(`[工具调用] 未能解析出工具调用`);
         }
       }
+      
+      // 如果既没有工具调用也没有内容，添加默认回复
+      if (toolCalls.length === 0 && (!data.choices[0].message.content || data.choices[0].message.content.trim() === '')) {
+        logger.warn('[工具调用] 流结束时检测到空响应，使用默认回复');
+        data.choices[0].message.content = '我理解了。请问有什么我可以帮助您的吗？';
+      }
+      
       resolve(data);
     });
   });
