@@ -483,9 +483,10 @@ async function createCompletionStream(
       // 如果有工具调用，发送工具调用信息（按照 OpenAI 流式格式）
       if (choice.message.tool_calls && choice.message.tool_calls.length > 0) {
         logger.info(`[流式工具调用] 发送 ${choice.message.tool_calls.length} 个工具调用`);
+        
         for (let i = 0; i < choice.message.tool_calls.length; i++) {
           const toolCall = choice.message.tool_calls[i];
-          logger.info(`[流式工具调用] 工具 ${i}: ${toolCall.function.name}, 参数长度: ${toolCall.function.arguments.length}`);
+          logger.info(`[流式工具调用] 工具 ${i}: ${toolCall.function.name}, 参数: ${toolCall.function.arguments}`);
           
           // 第一个 chunk: 发送 id, type, 和 function name
           transStream.write(`data: ${JSON.stringify({
@@ -498,7 +499,7 @@ async function createCompletionStream(
                 tool_calls: [{
                   index: i,
                   id: toolCall.id,
-                  type: toolCall.type,
+                  type: "function",
                   function: {
                     name: toolCall.function.name,
                     arguments: ""
@@ -532,8 +533,9 @@ async function createCompletionStream(
         }
       }
       
-      // 如果有内容，分块发送（模拟打字效果）
-      if (choice.message.content) {
+      // 如果有内容且没有工具调用，分块发送（模拟打字效果）
+      // 注意：根据 OpenAI 规范，有工具调用时不应该发送 content
+      if (choice.message.content && (!choice.message.tool_calls || choice.message.tool_calls.length === 0)) {
         const content = choice.message.content;
         const chunkSize = 5; // 每次发送5个字符
         for (let i = 0; i < content.length; i += chunkSize) {
@@ -1127,7 +1129,9 @@ async function receiveStream(model: string, stream: any, refConvId?: string, has
           if (toolCalls.length > 0) {
             data.choices[0].message.tool_calls = toolCalls;
             data.choices[0].finish_reason = 'tool_calls';
-            logger.success('[工具调用] 成功设置 tool_calls');
+            // 根据 OpenAI 规范，有工具调用时 content 应该为 null
+            data.choices[0].message.content = null;
+            logger.success('[工具调用] 成功设置 tool_calls，content 设为 null');
           }
           
           resolve(data);
@@ -1149,9 +1153,10 @@ async function receiveStream(model: string, stream: any, refConvId?: string, has
         if (parsed.toolCalls.length > 0) {
           logger.success(`[工具调用] 成功解析 ${parsed.toolCalls.length} 个工具调用`);
           toolCalls = parsed.toolCalls;
-          data.choices[0].message.content = parsed.cleanedText;
           data.choices[0].message.tool_calls = toolCalls;
           data.choices[0].finish_reason = 'tool_calls';
+          // 根据 OpenAI 规范，有工具调用时 content 应该为 null
+          data.choices[0].message.content = null;
         } else {
           logger.warn(`[工具调用] 未能解析出工具调用`);
         }
