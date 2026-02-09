@@ -480,9 +480,14 @@ async function createCompletionStream(
         return await createCompletionStream(model, messages, refreshToken, refConvId, retryCount);
       }
       
-      // 如果有工具调用，发送工具调用信息
+      // 如果有工具调用，发送工具调用信息（按照 OpenAI 流式格式）
       if (choice.message.tool_calls && choice.message.tool_calls.length > 0) {
-        for (const toolCall of choice.message.tool_calls) {
+        logger.info(`[流式工具调用] 发送 ${choice.message.tool_calls.length} 个工具调用`);
+        for (let i = 0; i < choice.message.tool_calls.length; i++) {
+          const toolCall = choice.message.tool_calls[i];
+          logger.info(`[流式工具调用] 工具 ${i}: ${toolCall.function.name}, 参数长度: ${toolCall.function.arguments.length}`);
+          
+          // 第一个 chunk: 发送 id, type, 和 function name
           transStream.write(`data: ${JSON.stringify({
             id: completion.id,
             model: completion.model,
@@ -491,11 +496,31 @@ async function createCompletionStream(
               index: 0,
               delta: {
                 tool_calls: [{
-                  index: 0,
+                  index: i,
                   id: toolCall.id,
                   type: toolCall.type,
                   function: {
                     name: toolCall.function.name,
+                    arguments: ""
+                  }
+                }]
+              },
+              finish_reason: null
+            }],
+            created
+          })}\n\n`);
+          
+          // 第二个 chunk: 发送 function arguments
+          transStream.write(`data: ${JSON.stringify({
+            id: completion.id,
+            model: completion.model,
+            object: "chat.completion.chunk",
+            choices: [{
+              index: 0,
+              delta: {
+                tool_calls: [{
+                  index: i,
+                  function: {
                     arguments: toolCall.function.arguments
                   }
                 }]
@@ -528,6 +553,7 @@ async function createCompletionStream(
       }
       
       // 发送结束标记
+      const finishReason = (choice.message.tool_calls && choice.message.tool_calls.length > 0) ? 'tool_calls' : choice.finish_reason;
       transStream.write(`data: ${JSON.stringify({
         id: completion.id,
         model: completion.model,
@@ -535,7 +561,7 @@ async function createCompletionStream(
         choices: [{
           index: 0,
           delta: {},
-          finish_reason: choice.finish_reason
+          finish_reason: finishReason
         }],
         created
       })}\n\n`);
